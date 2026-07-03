@@ -1,6 +1,6 @@
 import sys
 import os
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, Slot, QSize
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, Slot, QSize, QThread
 from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApplication, QFontMetrics
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -401,6 +401,45 @@ class MessageBubbleWidget(QWidget):
             self.clear_widgets_from(len(segments))
 
 
+class LiveOCRWorker(QThread):
+    ocr_completed = Signal(str)
+    ocr_failed = Signal(str)
+
+    def __init__(self, ocr_operator, png_bytes: bytes):
+        super().__init__()
+        self.ocr_operator = ocr_operator
+        self.png_bytes = png_bytes
+
+    def run(self):
+        try:
+            import io
+            from PIL import Image
+            import pytesseract
+            from ocr import detect_tesseract_binary
+
+            pil_image = Image.open(io.BytesIO(self.png_bytes))
+
+            # Configure tesseract cmd path
+            tesseract_bin = self.ocr_operator.settings.get_tesseract_path()
+            if not tesseract_bin:
+                tesseract_bin = detect_tesseract_binary()
+
+            if tesseract_bin and tesseract_bin != "tesseract":
+                pytesseract.pytesseract.tesseract_cmd = tesseract_bin
+
+            text = pytesseract.image_to_string(pil_image)
+            self.ocr_completed.emit(text.strip())
+        except pytesseract.TesseractNotFoundError:
+            self.ocr_failed.emit(
+                "Tesseract OCR executable not found.\n\n"
+                "Please make sure Tesseract is installed and configured:\n"
+                "- On Windows: Install Tesseract and set its path in the Settings tab.\n"
+                "- On macOS: Run 'brew install tesseract' in your terminal."
+            )
+        except Exception as e:
+            self.ocr_failed.emit(str(e))
+
+
 class OverlayWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -419,6 +458,13 @@ class OverlayWindow(QMainWindow):
         self.loading_timer.setInterval(400)
         self.loading_timer.timeout.connect(self.update_loading_animation)
         self.loading_dots_count = 0
+
+        # Background Live Screen OCR Timer
+        self.live_timer = QTimer(self)
+        self.live_timer.setInterval(4000)  # Check every 4 seconds
+        self.live_timer.timeout.connect(self.trigger_live_ocr_capture)
+        self.active_live_ocr_worker = None
+
 
         # Set up window properties for a borderless floating overlay
         self.setWindowFlags(
@@ -473,6 +519,11 @@ class OverlayWindow(QMainWindow):
 
         # Check LMStudio connection on startup
         self.check_lmstudio_status()
+
+        # Check if live screen is enabled by default and start it
+        if settings.get_live_screen_enabled():
+            self.live_timer.start()
+            self.trigger_live_ocr_capture()
 
     def on_resize_event(self, event):
         super().resizeEvent(event)
@@ -651,6 +702,16 @@ class OverlayWindow(QMainWindow):
         self.capture_btn.setObjectName("ActionButton")
         self.capture_btn.clicked.connect(self.start_region_capture)
         btn_layout.addWidget(self.capture_btn)
+
+        # Live Screen Toggle Button
+        self.live_screen_btn = QPushButton("Live Screen")
+        self.live_screen_btn.setObjectName("ActionButton")
+        self.live_screen_btn.setCheckable(True)
+        self.live_screen_btn.setChecked(settings.get_live_screen_enabled())
+        self.live_screen_btn.setToolTip("Automatically capture the screen in the background to use as context")
+        self.live_screen_btn.clicked.connect(self.on_live_screen_toggled)
+        btn_layout.addWidget(self.live_screen_btn)
+
 
         # Phase 2 Microphone Button (STT Stub)
         self.mic_btn = QPushButton("Mic")
@@ -847,7 +908,82 @@ class OverlayWindow(QMainWindow):
     def clear_screen_context(self):
         self.captured_context_text = ""
         self.context_frame.setVisible(False)
+        if self.live_screen_btn.isChecked():
+            self.live_screen_btn.setChecked(False)
+            self.live_timer.stop()
+            if self.active_live_ocr_worker and self.active_live_ocr_worker.isRunning():
+                self.active_live_ocr_worker.terminate()
+            self.log_system_message("Live Screen context auto-update disabled.")
         self.log_system_message("Screen OCR context cleared.")
+
+    @Slot(bool)
+    def on_live_screen_toggled(self, checked: bool):
+        settings.set_live_screen_enabled(checked)
+        if checked:
+            self.log_system_message("Live Screen context auto-update enabled.")
+            self.context_label.setText("Live Screen Context Active (Initializing...)")
+            self.context_frame.setVisible(True)
+            self.live_timer.start()
+            # Capture immediately to initialize context
+            self.trigger_live_ocr_capture()
+        else:
+            self.live_timer.stop()
+            if self.active_live_ocr_worker and self.active_live_ocr_worker.isRunning():
+                self.active_live_ocr_worker.terminate()
+            self.captured_context_text = ""
+            self.context_frame.setVisible(False)
+            self.log_system_message("Live Screen context auto-update disabled.")
+
+    def trigger_live_ocr_capture(self):
+        # Skip if window is minimized or invisible
+        if self.isMinimized() or not self.isVisible():
+            return
+        
+        # Skip if previous worker is still running
+        if self.active_live_ocr_worker and self.active_live_ocr_worker.isRunning():
+            return
+
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            return
+
+        try:
+            # Grab full primary screen
+            pixmap = screen.grabWindow(0)
+            if pixmap.isNull():
+                return
+            
+            # Convert to PNG bytes in the GUI thread safely
+            from PySide6.QtCore import QBuffer, QIODevice
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            png_bytes = buffer.data().data()
+            buffer.close()
+
+            # Start worker thread
+            self.active_live_ocr_worker = LiveOCRWorker(self.ocr_operator, png_bytes)
+            self.active_live_ocr_worker.ocr_completed.connect(self.on_live_ocr_completed)
+            self.active_live_ocr_worker.ocr_failed.connect(self.on_live_ocr_failed)
+            self.active_live_ocr_worker.start()
+        except Exception as e:
+            # Silently handle background errors or log them briefly in status
+            self.status_label.setText(f"Live OCR: Grab failed - {str(e)}")
+
+    @Slot(str)
+    def on_live_ocr_completed(self, text: str):
+        if not self.live_screen_btn.isChecked():
+            return
+        self.captured_context_text = text
+        chars_count = len(text)
+        self.context_label.setText(f"Live Screen Context ({chars_count} chars)")
+        self.context_frame.setVisible(True)
+
+    @Slot(str)
+    def on_live_ocr_failed(self, error: str):
+        if not self.live_screen_btn.isChecked():
+            return
+        self.status_label.setText(f"Live OCR: Failed - {error}")
 
     def trigger_mic_stub_alert(self):
         self.log_system_message(
@@ -971,7 +1107,8 @@ class OverlayWindow(QMainWindow):
             self.loading_timer.stop()
         self.status_label.setText("LMStudio: Ready")
         # Clear OCR context after it's been consumed in a prompt to avoid stale context
-        self.clear_screen_context()
+        if not self.live_screen_btn.isChecked():
+            self.clear_screen_context()
 
     @Slot(str)
     def on_generation_error(self, err_msg: str):
@@ -1127,6 +1264,11 @@ class OverlayWindow(QMainWindow):
                 color: #666666;
                 border-color: rgba(255, 255, 255, 8);
                 background-color: rgba(255, 255, 255, 3);
+            }
+            #ActionButton:checked {
+                color: #00a2e8;
+                background-color: rgba(0, 162, 232, 25);
+                border: 1px solid rgba(0, 162, 232, 50);
             }
             #SendButton {
                 background-color: #0078d7;

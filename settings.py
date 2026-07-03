@@ -6,6 +6,14 @@ class AppSettings:
         self.tesseract_path = ""
         self.overlay_opacity = 0.85
         self.always_on_top = True
+        self.live_screen_enabled = False
+
+    def get_live_screen_enabled(self) -> bool:
+        return self.live_screen_enabled
+
+    def set_live_screen_enabled(self, enable: bool):
+        self.live_screen_enabled = enable
+
 
     def get_api_url(self) -> str:
         return self.api_url
