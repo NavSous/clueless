@@ -27,3 +27,4 @@ python main.py
 - OS-level window display affinity exclusion (invisible to Zoom, Teams, Meet, OBS).
 - Built-in screen region capture and OCR context feed.
 - Offline streaming completions from local LMStudio.
+- Live screen OCR context awareness (automatic background capture of visible desktop contents).
