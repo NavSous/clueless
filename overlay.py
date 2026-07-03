@@ -5,7 +5,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApp
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTextBrowser, QTextEdit, QPushButton, QSlider, QStackedWidget,
-    QFileDialog, QFrame, QSizePolicy, QSizeGrip
+    QFileDialog, QFrame, QSizePolicy, QSizeGrip, QScrollArea
 )
 
 from settings import settings
@@ -29,6 +29,83 @@ class ChatInput(QTextEdit):
             super().keyPressEvent(event)
 
 
+class MessageBubbleWidget(QWidget):
+    def __init__(self, role: str, formatted_html: str, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 3, 0, 3)
+        layout.setSpacing(0)
+        
+        # Outer bubble frame
+        self.bubble_frame = QFrame()
+        self.bubble_frame.setObjectName(f"Bubble_{role}")
+        
+        bubble_layout = QVBoxLayout(self.bubble_frame)
+        bubble_layout.setContentsMargins(10, 8, 10, 8)
+        bubble_layout.setSpacing(3)
+        
+        # Sender label
+        sender_text = "You" if role == "user" else "Assistant" if role == "assistant" else "System"
+        self.sender_label = QLabel(sender_text)
+        self.sender_label.setObjectName("BubbleSender")
+        self.sender_label.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.sender_label.setStyleSheet("color: rgba(255, 255, 255, 110); text-transform: uppercase;")
+        bubble_layout.addWidget(self.sender_label)
+        
+        # Content label
+        self.content_label = QLabel()
+        self.content_label.setObjectName("BubbleContent")
+        self.content_label.setFont(QFont("Segoe UI", 9.5))
+        self.content_label.setWordWrap(True)
+        self.content_label.setTextFormat(Qt.TextFormat.RichText)
+        self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.content_label.setStyleSheet("color: #ececf1; background-color: transparent;")
+        
+        # Format HTML/markdown
+        self.content_label.setText(formatted_html)
+        bubble_layout.addWidget(self.content_label)
+        
+        # Set alignment and margins based on role
+        if role == "user":
+            layout.addStretch()
+            layout.addWidget(self.bubble_frame)
+            self.bubble_frame.setStyleSheet("""
+                QFrame#Bubble_user {
+                    background-color: rgba(0, 120, 215, 140);
+                    border: 1px solid rgba(0, 120, 215, 180);
+                    border-radius: 14px;
+                    border-bottom-right-radius: 3px;
+                }
+            """)
+            self.bubble_frame.setMaximumWidth(310)
+        elif role == "assistant":
+            layout.addWidget(self.bubble_frame)
+            layout.addStretch()
+            self.bubble_frame.setStyleSheet("""
+                QFrame#Bubble_assistant {
+                    background-color: rgba(255, 255, 255, 18);
+                    border: 1px solid rgba(255, 255, 255, 25);
+                    border-radius: 14px;
+                    border-bottom-left-radius: 3px;
+                }
+            """)
+            self.bubble_frame.setMaximumWidth(310)
+        else: # System message
+            layout.addWidget(self.bubble_frame)
+            self.sender_label.setVisible(False)
+            self.bubble_frame.setStyleSheet("""
+                QFrame#Bubble_system {
+                    background-color: transparent;
+                    border: none;
+                }
+            """)
+            self.content_label.setFont(QFont("Segoe UI", 8.5))
+            self.content_label.setStyleSheet("color: #b0b0b8; font-style: italic;")
+
+    def update_text(self, formatted_html: str):
+        self.content_label.setText(formatted_html)
+
+
 class OverlayWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -40,6 +117,13 @@ class OverlayWindow(QMainWindow):
         # Initialize Phase 2 Stubs
         self.audio_recorder = AudioLoopbackRecorder()
         self.stt_engine = WhisperSTTEngine()
+
+        # Loading animation timer for LLM responses
+        from PySide6.QtCore import QTimer
+        self.loading_timer = QTimer(self)
+        self.loading_timer.setInterval(400)
+        self.loading_timer.timeout.connect(self.update_loading_animation)
+        self.loading_dots_count = 0
 
         # Set up window properties for a borderless floating overlay
         self.setWindowFlags(
@@ -204,23 +288,34 @@ class OverlayWindow(QMainWindow):
     def setup_chat_view(self):
         chat_widget = QWidget()
         chat_layout = QVBoxLayout(chat_widget)
-        chat_layout.setContentsMargins(10, 10, 10, 10)
-        chat_layout.setSpacing(8)
+        chat_layout.setContentsMargins(6, 6, 6, 6)
+        chat_layout.setSpacing(5)
 
-        # Chat Text Browser
-        self.chat_display = QTextBrowser()
-        self.chat_display.setObjectName("ChatDisplay")
-        self.chat_display.setOpenExternalLinks(True)
-        chat_layout.addWidget(self.chat_display)
+        # Chat Scroll Area for native bubbles
+        self.chat_scroll = QScrollArea()
+        self.chat_scroll.setObjectName("ChatScroll")
+        self.chat_scroll.setWidgetResizable(True)
+        self.chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("ScrollContent")
+        self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_layout.setContentsMargins(6, 6, 6, 6)
+        self.scroll_layout.setSpacing(6)
+        self.scroll_layout.addStretch() # Push messages to bottom
+        
+        self.chat_scroll.setWidget(self.scroll_content)
+        chat_layout.addWidget(self.chat_scroll)
 
         # Captured Context Bar (Hidden until content exists)
         self.context_frame = QFrame()
         self.context_frame.setObjectName("ContextFrame")
-        self.context_frame.setFixedHeight(32)
+        self.context_frame.setFixedHeight(28)
         self.context_frame.setVisible(False)
         
         context_layout = QHBoxLayout(self.context_frame)
-        context_layout.setContentsMargins(8, 0, 8, 0)
+        context_layout.setContentsMargins(6, 0, 6, 0)
         
         self.context_label = QLabel("Screen OCR Context Active")
         self.context_label.setObjectName("ContextLabel")
@@ -238,22 +333,23 @@ class OverlayWindow(QMainWindow):
         # Input Area Panel
         input_panel = QFrame()
         input_panel.setObjectName("InputPanel")
+        input_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         
         input_layout = QVBoxLayout(input_panel)
-        input_layout.setContentsMargins(6, 6, 6, 6)
-        input_layout.setSpacing(6)
+        input_layout.setContentsMargins(4, 4, 4, 4)
+        input_layout.setSpacing(4)
 
         # Text input field
         self.input_field = ChatInput()
         self.input_field.setObjectName("InputField")
         self.input_field.setPlaceholderText("Type a prompt... (Shift+Enter for newline)")
-        self.input_field.setFixedHeight(50)
+        self.input_field.setFixedHeight(36)
         self.input_field.enter_pressed.connect(self.send_user_message)
         input_layout.addWidget(self.input_field)
 
         # Buttons bar
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
+        btn_layout.setSpacing(4)
 
         # Capture Screen Button
         self.capture_btn = QPushButton("Capture Region")
@@ -484,7 +580,25 @@ class OverlayWindow(QMainWindow):
 
     def log_system_message(self, text: str):
         self.chat_history.append({"role": "system", "content": text})
-        self.update_chat_display()
+        self.add_chat_message("system", text)
+
+    def add_chat_message(self, role: str, text: str) -> MessageBubbleWidget:
+        formatted_html = self.simple_markdown_to_html(text) if role != "system" else text
+        bubble = MessageBubbleWidget(role, formatted_html)
+        self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, bubble)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, self.scroll_to_bottom)
+        return bubble
+
+    def scroll_to_bottom(self):
+        scrollbar = self.chat_scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def update_loading_animation(self):
+        self.loading_dots_count = (self.loading_dots_count % 3) + 1
+        dots = "." * self.loading_dots_count
+        if hasattr(self, "active_assistant_bubble") and self.active_assistant_bubble:
+            self.active_assistant_bubble.update_text(f"<span style='color: #88888f; font-style: italic;'>Thinking{dots}</span>")
 
     def send_user_message(self):
         user_text = self.input_field.toPlainText().strip()
@@ -499,8 +613,8 @@ class OverlayWindow(QMainWindow):
         # Display user message in chat
         display_text = user_text if user_text else "[Sent Screen OCR Context Only]"
         self.chat_history.append({"role": "user", "content": display_text})
+        self.add_chat_message("user", display_text)
         self.input_field.clear()
-        self.update_chat_display()
 
         # Formulate messages prompt
         # We append OCR text as hidden system prompt context
@@ -530,6 +644,10 @@ class OverlayWindow(QMainWindow):
         # Setup streaming worker
         self.status_label.setText("LMStudio: Generating response...")
         self.chat_history.append({"role": "assistant", "content": ""}) # placeholder for streamed content
+        self.active_assistant_bubble = self.add_chat_message("assistant", "")
+        self.loading_dots_count = 0
+        self.update_loading_animation()
+        self.loading_timer.start()
         
         self.active_llm_worker = LLMWorker(
             settings.get_api_url(),
@@ -543,23 +661,31 @@ class OverlayWindow(QMainWindow):
 
     @Slot(str)
     def on_token_received(self, token: str):
-        # Update the content of the last chat message (which is our assistant placeholder)
+        if self.loading_timer.isActive():
+            self.loading_timer.stop()
+            self.active_assistant_bubble.update_text("")
+
         if self.chat_history and self.chat_history[-1]["role"] == "assistant":
             self.chat_history[-1]["content"] += token
-            self.update_chat_display()
+            formatted = self.simple_markdown_to_html(self.chat_history[-1]["content"])
+            self.active_assistant_bubble.update_text(formatted)
 
     @Slot(str)
     def on_generation_finished(self, full_response: str):
+        if self.loading_timer.isActive():
+            self.loading_timer.stop()
         self.status_label.setText("LMStudio: Ready")
         # Clear OCR context after it's been consumed in a prompt to avoid stale context
         self.clear_screen_context()
 
     @Slot(str)
     def on_generation_error(self, err_msg: str):
+        if self.loading_timer.isActive():
+            self.loading_timer.stop()
         self.status_label.setText("LMStudio: Error")
         if self.chat_history and self.chat_history[-1]["role"] == "assistant":
             self.chat_history[-1]["content"] = f"<span style='color: #ff5555;'>[Error: {err_msg}]</span>"
-            self.update_chat_display()
+            self.active_assistant_bubble.update_text(self.chat_history[-1]["content"])
 
     def simple_markdown_to_html(self, text: str) -> str:
         """
@@ -604,85 +730,6 @@ class OverlayWindow(QMainWindow):
         # Convert newlines to breaks
         result = result.replace("\n", "<br/>")
         return result
-
-    def update_chat_display(self):
-        html_header = """
-        <html>
-        <head>
-        <style>
-        body {
-            font-family: 'Segoe UI', Arial, sans-serif;
-            font-size: 13px;
-            color: #ececf1;
-            background-color: transparent;
-            margin: 5px;
-        }
-        .msg {
-            margin-bottom: 12px;
-            padding: 8px 12px;
-            border-radius: 8px;
-        }
-        .user {
-            background-color: rgba(0, 120, 215, 75);
-            border: 1px solid rgba(0, 120, 215, 120);
-            margin-left: 20px;
-        }
-        .assistant {
-            background-color: rgba(255, 255, 255, 20);
-            border: 1px solid rgba(255, 255, 255, 30);
-            margin-right: 20px;
-        }
-        .system {
-            background-color: rgba(255, 255, 255, 8);
-            border-left: 3px solid rgba(255, 255, 255, 60);
-            font-size: 11px;
-            color: #b0b0b8;
-            margin-left: 5px;
-            margin-right: 5px;
-        }
-        pre {
-            background-color: rgba(0, 0, 0, 120);
-            border: 1px solid rgba(255, 255, 255, 15);
-            padding: 8px;
-            border-radius: 6px;
-            font-family: 'Consolas', 'Courier New', monospace;
-            overflow-x: auto;
-        }
-        code {
-            font-family: 'Consolas', 'Courier New', monospace;
-            color: #f1f1f1;
-            background-color: rgba(0, 0, 0, 100);
-            padding: 2px 4px;
-            border-radius: 3px;
-        }
-        b {
-            color: #ffffff;
-        }
-        </style>
-        </head>
-        <body>
-        """
-
-        html_body = ""
-        for msg in self.chat_history:
-            role = msg["role"]
-            content = msg["content"]
-            
-            if role == "user":
-                formatted = self.simple_markdown_to_html(content)
-                html_body += f'<div class="msg user"><b>You</b><br/>{formatted}</div>'
-            elif role == "assistant":
-                formatted = self.simple_markdown_to_html(content)
-                html_body += f'<div class="msg assistant"><b>Assistant</b><br/>{formatted}</div>'
-            elif role == "system":
-                html_body += f'<div class="msg system"><i>{content}</i></div>'
-
-        html_footer = "</body></html>"
-        
-        self.chat_display.setHtml(html_header + html_body + html_footer)
-        # Force scrolling to the bottom
-        scrollbar = self.chat_display.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
 
     def apply_stylesheets(self):
         # Global CSS-like rules for QT styling (QSS)
@@ -730,11 +777,13 @@ class OverlayWindow(QMainWindow):
                 background-color: #ff3333;
                 border-radius: 4px;
             }
-            #ChatDisplay {
+            #ChatScroll {
                 background-color: rgba(0, 0, 0, 70);
                 border: 1px solid rgba(255, 255, 255, 15);
                 border-radius: 8px;
-                color: #ececf1;
+            }
+            #ScrollContent {
+                background-color: transparent;
             }
             #ContextFrame {
                 background-color: rgba(0, 162, 232, 25);

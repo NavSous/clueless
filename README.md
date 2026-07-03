@@ -1,6 +1,6 @@
 # Clueless
 
-Local cross-platform offline desktop AI assistant overlay.
+Local cross-platform offline desktop SLM assistant overlay.
 
 ## Prerequisites
 
