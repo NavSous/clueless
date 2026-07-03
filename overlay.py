@@ -1,7 +1,7 @@
 import sys
 import os
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, Slot, QSize
-from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApplication
+from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApplication, QFontMetrics
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTextBrowser, QTextEdit, QPushButton, QSlider, QStackedWidget,
@@ -29,8 +29,117 @@ class ChatInput(QTextEdit):
             super().keyPressEvent(event)
 
 
+def format_text_to_html(text: str) -> str:
+    """
+    Lightweight custom formatter to render bold, inline code, and line breaks.
+    """
+    import html
+    escaped_text = html.escape(text)
+    
+    # 1. Bold (**text**)
+    parts = escaped_text.split("**")
+    formatted_parts = []
+    for idx, part in enumerate(parts):
+        if idx % 2 == 1:
+            formatted_parts.append(f"<b>{part}</b>")
+        else:
+            # 2. Inline code (`code`)
+            inline_parts = part.split("`")
+            formatted_inline = []
+            for inline_idx, inline_part in enumerate(inline_parts):
+                if inline_idx % 2 == 1:
+                    formatted_inline.append(f"<code>{inline_part}</code>")
+                else:
+                    formatted_inline.append(inline_part)
+            formatted_parts.append("".join(formatted_inline))
+            
+    result = "".join(formatted_parts)
+    result = result.replace("\n", "<br/>")
+    return result
+
+
+class CodeBlockWidget(QWidget):
+    def __init__(self, language: str, code_content: str, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(0)
+
+        # 1. Header Bar
+        header = QWidget()
+        header.setStyleSheet("""
+            QWidget {
+                background-color: #2a2a30;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 15);
+                border-bottom: none;
+            }
+        """)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+
+        lang_label = QLabel(language.upper() if language else "CODE")
+        lang_label.setStyleSheet("color: #a0a0a8; font-weight: bold; font-size: 9px; background: transparent; border: none;")
+        header_layout.addWidget(lang_label)
+        header_layout.addStretch()
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #a0a0a8;
+                font-size: 9px;
+                font-weight: bold;
+                padding: 2px 6px;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background-color: rgba(255, 255, 255, 20);
+                border-radius: 3px;
+            }
+        """)
+        header_layout.addWidget(copy_btn)
+        layout.addWidget(header)
+
+        # 2. Monospace Code Body
+        self.body = QTextEdit()
+        self.body.setReadOnly(True)
+        self.body.setPlainText(code_content)
+        self.body.setFont(QFont("Consolas", 9))
+        self.body.setStyleSheet("""
+            QTextEdit {
+                background-color: #121215;
+                border: 1px solid rgba(255, 255, 255, 15);
+                border-top: none;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
+                color: #e0e0e8;
+                padding: 6px;
+            }
+        """)
+        layout.addWidget(self.body)
+        
+        # Connect click event after self.body is initialized
+        copy_btn.clicked.connect(self.copy_to_clipboard)
+        
+        self.update_code(code_content)
+
+    def update_code(self, new_code: str):
+        self.body.setPlainText(new_code)
+        font_metrics = QFontMetrics(self.body.font())
+        line_height = font_metrics.lineSpacing()
+        line_count = new_code.count('\n') + 1
+        total_height = line_count * line_height + 16
+        self.body.setFixedHeight(min(250, max(60, total_height)))
+
+    def copy_to_clipboard(self):
+        QGuiApplication.clipboard().setText(self.body.toPlainText())
+
+
 class MessageBubbleWidget(QWidget):
-    def __init__(self, role: str, formatted_html: str, parent=None):
+    def __init__(self, role: str, raw_text: str, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 3, 0, 3)
@@ -40,9 +149,9 @@ class MessageBubbleWidget(QWidget):
         self.bubble_frame = QFrame()
         self.bubble_frame.setObjectName(f"Bubble_{role}")
         
-        bubble_layout = QVBoxLayout(self.bubble_frame)
-        bubble_layout.setContentsMargins(10, 8, 10, 8)
-        bubble_layout.setSpacing(3)
+        self.bubble_layout = QVBoxLayout(self.bubble_frame)
+        self.bubble_layout.setContentsMargins(10, 8, 10, 8)
+        self.bubble_layout.setSpacing(4)
         
         # Sender label
         sender_text = "You" if role == "user" else "Assistant" if role == "assistant" else "System"
@@ -50,20 +159,7 @@ class MessageBubbleWidget(QWidget):
         self.sender_label.setObjectName("BubbleSender")
         self.sender_label.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         self.sender_label.setStyleSheet("color: rgba(255, 255, 255, 110); text-transform: uppercase;")
-        bubble_layout.addWidget(self.sender_label)
-        
-        # Content label
-        self.content_label = QLabel()
-        self.content_label.setObjectName("BubbleContent")
-        self.content_label.setFont(QFont("Segoe UI", 9.5))
-        self.content_label.setWordWrap(True)
-        self.content_label.setTextFormat(Qt.TextFormat.RichText)
-        self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.content_label.setStyleSheet("color: #ececf1; background-color: transparent;")
-        
-        # Format HTML/markdown
-        self.content_label.setText(formatted_html)
-        bubble_layout.addWidget(self.content_label)
+        self.bubble_layout.addWidget(self.sender_label)
         
         # Set alignment and margins based on role
         if role == "user":
@@ -99,11 +195,85 @@ class MessageBubbleWidget(QWidget):
                     border: none;
                 }
             """)
-            self.content_label.setFont(QFont("Segoe UI", 8.5))
-            self.content_label.setStyleSheet("color: #b0b0b8; font-style: italic;")
+            
+        self.role = role
+        self.widgets_list = [] # Store tuple of (is_code, widget)
+        self.update_content(raw_text)
 
-    def update_text(self, formatted_html: str):
-        self.content_label.setText(formatted_html)
+    def clear_widgets_from(self, start_idx: int):
+        while self.bubble_layout.count() > start_idx + 1:
+            item = self.bubble_layout.takeAt(start_idx + 1)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self.widgets_list = self.widgets_list[:start_idx]
+
+    def update_content(self, raw_text: str):
+        is_loading = raw_text.startswith("Thinking.") or raw_text.startswith("Thinking..") or raw_text.startswith("Thinking...")
+        
+        segments = []
+        if is_loading:
+            segments.append((False, "", raw_text))
+        else:
+            parts = raw_text.split("```")
+            for idx, part in enumerate(parts):
+                if idx % 2 == 1:
+                    lines = part.split("\n", 1)
+                    lang = lines[0].strip() if len(lines) > 1 else ""
+                    code_content = lines[1] if len(lines) > 1 else lines[0]
+                    if code_content.strip() or idx == len(parts) - 1:
+                        segments.append((True, lang, code_content))
+                else:
+                    if part.strip() or len(parts) == 1:
+                        segments.append((False, "", part))
+
+        # Sync widgets in self.widgets_list with parsed segments
+        for i, seg in enumerate(segments):
+            is_code, lang, content = seg
+            
+            if i < len(self.widgets_list):
+                curr_is_code, w = self.widgets_list[i]
+                if curr_is_code == is_code:
+                    if is_code:
+                        w.update_code(content)
+                    else:
+                        formatted = format_text_to_html(content) if self.role != "system" else content
+                        w.setText(formatted)
+                    continue
+                else:
+                    self.clear_widgets_from(i)
+
+            # Create new segment widget
+            if is_code:
+                w = CodeBlockWidget(lang, content)
+                self.bubble_layout.addWidget(w)
+                self.widgets_list.append((True, w))
+            else:
+                if self.role == "system":
+                    w = QLabel(content)
+                    w.setFont(QFont("Segoe UI", 8.5))
+                    w.setWordWrap(True)
+                    w.setTextFormat(Qt.TextFormat.PlainText)
+                    w.setStyleSheet("color: #b0b0b8; font-style: italic;")
+                elif is_loading:
+                    w = QLabel(content)
+                    w.setFont(QFont("Segoe UI", 9))
+                    w.setWordWrap(True)
+                    w.setStyleSheet("color: #88888f; font-style: italic;")
+                else:
+                    formatted = format_text_to_html(content)
+                    w = QLabel(formatted)
+                    w.setFont(QFont("Segoe UI", 9.5))
+                    w.setWordWrap(True)
+                    w.setTextFormat(Qt.TextFormat.RichText)
+                    w.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                    w.setStyleSheet("color: #ececf1; background-color: transparent;")
+                
+                self.bubble_layout.addWidget(w)
+                self.widgets_list.append((False, w))
+
+        if len(self.widgets_list) > len(segments):
+            self.clear_widgets_from(len(segments))
 
 
 class OverlayWindow(QMainWindow):
@@ -583,22 +753,22 @@ class OverlayWindow(QMainWindow):
         self.add_chat_message("system", text)
 
     def add_chat_message(self, role: str, text: str) -> MessageBubbleWidget:
-        formatted_html = self.simple_markdown_to_html(text) if role != "system" else text
-        bubble = MessageBubbleWidget(role, formatted_html)
+        bubble = MessageBubbleWidget(role, text)
         self.scroll_layout.insertWidget(self.scroll_layout.count() - 1, bubble)
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(50, self.scroll_to_bottom)
+        QTimer.singleShot(50, lambda: self.scroll_to_bottom(force=True))
         return bubble
 
-    def scroll_to_bottom(self):
+    def scroll_to_bottom(self, force=False):
         scrollbar = self.chat_scroll.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        if force or scrollbar.value() >= scrollbar.maximum() - 40:
+            scrollbar.setValue(scrollbar.maximum())
 
     def update_loading_animation(self):
         self.loading_dots_count = (self.loading_dots_count % 3) + 1
         dots = "." * self.loading_dots_count
         if hasattr(self, "active_assistant_bubble") and self.active_assistant_bubble:
-            self.active_assistant_bubble.update_text(f"<span style='color: #88888f; font-style: italic;'>Thinking{dots}</span>")
+            self.active_assistant_bubble.update_content(f"Thinking{dots}")
 
     def send_user_message(self):
         user_text = self.input_field.toPlainText().strip()
@@ -663,12 +833,12 @@ class OverlayWindow(QMainWindow):
     def on_token_received(self, token: str):
         if self.loading_timer.isActive():
             self.loading_timer.stop()
-            self.active_assistant_bubble.update_text("")
+            self.active_assistant_bubble.update_content("")
 
         if self.chat_history and self.chat_history[-1]["role"] == "assistant":
             self.chat_history[-1]["content"] += token
-            formatted = self.simple_markdown_to_html(self.chat_history[-1]["content"])
-            self.active_assistant_bubble.update_text(formatted)
+            self.active_assistant_bubble.update_content(self.chat_history[-1]["content"])
+            self.scroll_to_bottom(force=False)
 
     @Slot(str)
     def on_generation_finished(self, full_response: str):
@@ -685,7 +855,7 @@ class OverlayWindow(QMainWindow):
         self.status_label.setText("LMStudio: Error")
         if self.chat_history and self.chat_history[-1]["role"] == "assistant":
             self.chat_history[-1]["content"] = f"<span style='color: #ff5555;'>[Error: {err_msg}]</span>"
-            self.active_assistant_bubble.update_text(self.chat_history[-1]["content"])
+            self.active_assistant_bubble.update_content(self.chat_history[-1]["content"])
 
     def simple_markdown_to_html(self, text: str) -> str:
         """
