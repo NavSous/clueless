@@ -1,11 +1,12 @@
 import sys
 import os
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, Slot, QSize, QThread
-from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApplication, QFontMetrics
+from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QFont, QCursor, QGuiApplication, QFontMetrics, QAction, QPixmap
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QTextBrowser, QTextEdit, QPushButton, QSlider, QStackedWidget,
-    QFileDialog, QFrame, QSizePolicy, QSizeGrip, QScrollArea
+    QFileDialog, QFrame, QSizePolicy, QSizeGrip, QScrollArea,
+    QSystemTrayIcon, QMenu
 )
 
 from settings import settings
@@ -525,6 +526,9 @@ class OverlayWindow(QMainWindow):
             self.live_timer.start()
             self.trigger_live_ocr_capture()
 
+        # Initialize System Tray Icon
+        self.setup_tray_icon()
+
     def on_resize_event(self, event):
         super().resizeEvent(event)
         # Place size grip at the bottom right corner
@@ -568,6 +572,59 @@ class OverlayWindow(QMainWindow):
             except Exception as e:
                 self.log_system_message(f"macOS affinity error: {str(e)}")
 
+    def setup_tray_icon(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.create_tray_icon())
+        self.tray_icon.setToolTip("Clueless Desktop Assistant")
+
+        tray_menu = QMenu()
+        show_action = QAction("Show Assistant", self)
+        show_action.triggered.connect(self.restore_from_tray)
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+
+        tray_menu.addAction(show_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(exit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def create_tray_icon(self) -> QIcon:
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw base circle
+        painter.setBrush(QColor(32, 32, 40))
+        painter.setPen(QPen(QColor(0, 162, 232), 2))
+        painter.drawEllipse(2, 2, 28, 28)
+        
+        # Draw "C" character
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "C")
+        painter.end()
+        return QIcon(pixmap)
+
+    def minimize_to_tray(self):
+        self.hide()
+        self.log_system_message("Clueless minimized to system tray.")
+
+    def restore_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:  # Single left-click
+            if self.isVisible() and not self.isMinimized():
+                self.minimize_to_tray()
+            else:
+                self.restore_from_tray()
+
     def setup_title_bar(self):
         self.title_bar = QWidget()
         self.title_bar.setObjectName("TitleBar")
@@ -605,7 +662,7 @@ class OverlayWindow(QMainWindow):
         # Minimize Button
         self.minimize_btn = QPushButton("-")
         self.minimize_btn.setObjectName("TitleButton")
-        self.minimize_btn.clicked.connect(self.showMinimized)
+        self.minimize_btn.clicked.connect(self.minimize_to_tray)
         title_layout.addWidget(self.minimize_btn)
 
         # Close Button
