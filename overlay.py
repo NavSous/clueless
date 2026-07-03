@@ -31,19 +31,144 @@ class ChatInput(QTextEdit):
 
 def format_text_to_html(text: str) -> str:
     """
-    Lightweight custom formatter to render bold, inline code, and line breaks.
+    Lightweight custom formatter to render bold, inline code, LaTeX math, and line breaks.
     """
     import html
+    import re
+
+    # Common LaTeX symbol mappings to standard Unicode characters
+    latex_replacements = {
+        # Greek letters (lowercase)
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\gamma": "γ",
+        r"\delta": "δ",
+        r"\epsilon": "ε",
+        r"\zeta": "ζ",
+        r"\eta": "η",
+        r"\theta": "θ",
+        r"\iota": "ι",
+        r"\kappa": "κ",
+        r"\lambda": "λ",
+        r"\mu": "μ",
+        r"\nu": "ν",
+        r"\xi": "ξ",
+        r"\pi": "π",
+        r"\rho": "ρ",
+        r"\sigma": "σ",
+        r"\tau": "τ",
+        r"\upsilon": "υ",
+        r"\phi": "φ",
+        r"\chi": "χ",
+        r"\psi": "ψ",
+        r"\omega": "ω",
+        # Greek letters (uppercase)
+        r"\Delta": "Δ",
+        r"\Gamma": "Γ",
+        r"\Theta": "Θ",
+        r"\Lambda": "Λ",
+        r"\Xi": "Ξ",
+        r"\Pi": "Π",
+        r"\Sigma": "Σ",
+        r"\Upsilon": "Υ",
+        r"\Phi": "Φ",
+        r"\Psi": "Ψ",
+        r"\Omega": "Ω",
+        # Math operators and relations
+        r"\times": "×",
+        r"\div": "÷",
+        r"\cdot": "·",
+        r"\pm": "±",
+        r"\mp": "∓",
+        r"\leq": "≤",
+        r"\geq": "≥",
+        r"\le": "≤",
+        r"\ge": "≥",
+        r"\neq": "≠",
+        r"\approx": "≈",
+        r"\equiv": "≡",
+        r"\propto": "∝",
+        r"\infty": "∞",
+        r"\partial": "∂",
+        r"\sum": "∑",
+        r"\int": "∫",
+        r"\prod": "∏",
+        r"\sqrt": "√",
+        r"\nabla": "∇",
+        r"\in": "∈",
+        r"\notin": "∉",
+        r"\subset": "⊂",
+        r"\supset": "⊃",
+        r"\subseteq": "⊆",
+        r"\supseteq": "⊇",
+        r"\cap": "∩",
+        r"\cup": "∪",
+        r"\forall": "∀",
+        r"\exists": "∃",
+        # Arrows
+        r"\leftarrow": "←",
+        r"\rightarrow": "→",
+        r"\to": "→",
+        r"\leftrightarrow": "↔",
+        r"\Leftarrow": "⇐",
+        r"\Rightarrow": "⇒",
+        r"\Leftrightarrow": "⇔",
+    }
+
+    # 1. Escape basic HTML first
     escaped_text = html.escape(text)
-    
-    # 1. Bold (**text**)
+
+    # 2. Block math $$ ... $$ and \[ ... \]
+    escaped_text = re.sub(
+        r'\$\$(.*?)\$\$', 
+        r'<div style="text-align: center; margin: 6px 0; font-style: italic; font-size: 13px;">\1</div>', 
+        escaped_text, 
+        flags=re.DOTALL
+    )
+    escaped_text = re.sub(
+        r'\\\[(.*?)\\\]', 
+        r'<div style="text-align: center; margin: 6px 0; font-style: italic; font-size: 13px;">\1</div>', 
+        escaped_text, 
+        flags=re.DOTALL
+    )
+
+    # 3. Inline math $ ... $ and \( ... \)
+    escaped_text = re.sub(
+        r'\$([^\$]+?)\$', 
+        r'<span style="font-style: italic;">\1</span>', 
+        escaped_text
+    )
+    escaped_text = re.sub(
+        r'\\\((.*?)\\\)', 
+        r'<span style="font-style: italic;">\1</span>', 
+        escaped_text
+    )
+
+    # 4. Math fractions (\frac{a}{b})
+    escaped_text = re.sub(
+        r'\\frac\{(.*?)\}\{(.*?)\}',
+        r'<sup>\1</sup>&frasl;<sub>\2</sub>',
+        escaped_text
+    )
+
+    # 5. Superscripts and Subscripts
+    escaped_text = re.sub(r'\^\{(.*?)\}', r'<sup>\1</sup>', escaped_text)
+    escaped_text = re.sub(r'\_\{(.*?)\}', r'<sub>\1</sub>', escaped_text)
+    escaped_text = re.sub(r'\^([a-zA-Z0-9])', r'<sup>\1</sup>', escaped_text)
+    escaped_text = re.sub(r'\_([a-zA-Z0-9])', r'<sub>\1</sub>', escaped_text)
+
+    # 6. Apply LaTeX replacements
+    for latex_sym, unicode_sym in latex_replacements.items():
+        escaped_text = escaped_text.replace(latex_sym, unicode_sym)
+
+    # 7. Bold (**text**)
     parts = escaped_text.split("**")
     formatted_parts = []
     for idx, part in enumerate(parts):
         if idx % 2 == 1:
             formatted_parts.append(f"<b>{part}</b>")
         else:
-            # 2. Inline code (`code`)
+            # 8. Inline code (`code`)
             inline_parts = part.split("`")
             formatted_inline = []
             for inline_idx, inline_part in enumerate(inline_parts):
