@@ -510,6 +510,12 @@ class OverlayWindow(QMainWindow):
         self.capture_overlay = CaptureOverlay()
         self.capture_overlay.region_captured.connect(self.on_region_captured)
 
+        # Connect audio recorder and STT signals
+        self.audio_recorder.status_message.connect(self.status_label.setText)
+        self.stt_engine.status_message.connect(self.status_label.setText)
+        self.stt_engine.transcription_complete.connect(self.on_voice_transcription_complete)
+        self.stt_engine.error_occurred.connect(self.on_voice_transcription_error)
+
         # Add a size grip in the bottom-right corner for resizing
         self.size_grip = QSizeGrip(self)
         self.size_grip.setFixedSize(16, 16)
@@ -774,8 +780,8 @@ class OverlayWindow(QMainWindow):
         self.mic_btn = QPushButton("Mic")
         self.mic_btn.setObjectName("ActionButton")
         self.mic_btn.setEnabled(True)
-        self.mic_btn.setToolTip("Phase 2: Real-time Audio Loopback & Transcription")
-        self.mic_btn.clicked.connect(self.trigger_mic_stub_alert)
+        self.mic_btn.setToolTip("Real-time Audio Loopback & Transcription")
+        self.mic_btn.clicked.connect(self.toggle_audio_recording)
         btn_layout.addWidget(self.mic_btn)
 
         btn_layout.addStretch()
@@ -1042,11 +1048,112 @@ class OverlayWindow(QMainWindow):
             return
         self.status_label.setText(f"Live OCR: Failed - {error}")
 
-    def trigger_mic_stub_alert(self):
-        self.log_system_message(
-            "<b>Phase 2 Feature Stub:</b> Real-time system audio and microphone loopback capture.<br/>"
-            "This will stream raw audio buffers to a local Whisper STT model instance to feed live conversational context into the SLM prompt chain."
-        )
+    def toggle_audio_recording(self):
+        if self.audio_recorder.is_recording():
+            self.mic_btn.setEnabled(False)
+            self.mic_btn.setText("⌛ Transcribing...")
+            self.mic_btn.setToolTip("Transcribing voice input...")
+            self.status_label.setText("Stopping recording and transcribing...")
+            
+            file_path = self.audio_recorder.stop_recording()
+            
+            api_url = settings.get_api_url()
+            model_name = settings.get_model_name()
+            if model_name == "local-model":
+                model_name = "whisper-1"
+            self.stt_engine.transcribe_audio_file(api_url, file_path, model_name)
+        else:
+            success = self.audio_recorder.start_recording()
+            if success:
+                self.mic_btn.setText("🔴 Stop")
+                self.mic_btn.setToolTip("Click to stop recording and process")
+                self.mic_btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #d32f2f !important;
+                        color: white !important;
+                    }
+                """)
+                self.status_label.setText("Listening...")
+            else:
+                self.status_label.setText("Could not start recording. Check microphone settings.")
+
+    @Slot(str)
+    def on_voice_transcription_complete(self, text: str):
+        self.mic_btn.setEnabled(True)
+        self.mic_btn.setText("Mic")
+        self.mic_btn.setToolTip("Real-time Audio Loopback & Transcription")
+        self.mic_btn.setStyleSheet("")
+        self.status_label.setText("LMStudio: Ready")
+        
+        if not text or not text.strip():
+            self.log_system_message("Voice input transcription was empty.")
+            return
+            
+        self.log_system_message(f"<b>Voice Input:</b> \"{text}\"")
+        self.execute_voice_command(text)
+
+    @Slot(str)
+    def on_voice_transcription_error(self, error: str):
+        self.mic_btn.setEnabled(True)
+        self.mic_btn.setText("Mic")
+        self.mic_btn.setToolTip("Real-time Audio Loopback & Transcription")
+        self.mic_btn.setStyleSheet("")
+        self.status_label.setText("Transcription failed")
+        
+        self.log_system_message(f"<font color='#d32f2f'><b>STT Error:</b> {error}</font>")
+
+    def execute_voice_command(self, text: str):
+        normalized = text.lower().strip().rstrip(".!?")
+        
+        if normalized in ["capture region", "capture screen", "take screenshot", "screenshot"]:
+            self.log_system_message("Voice Command: Capturing screen region...")
+            self.start_region_capture()
+            
+        elif normalized in ["live screen on", "enable live screen", "start live screen"]:
+            self.log_system_message("Voice Command: Enabling live screen context...")
+            self.live_screen_btn.setChecked(True)
+            self.on_live_screen_toggled(True)
+            
+        elif normalized in ["live screen off", "disable live screen", "stop live screen"]:
+            self.log_system_message("Voice Command: Disabling live screen context...")
+            self.live_screen_btn.setChecked(False)
+            self.on_live_screen_toggled(False)
+            
+        elif normalized in ["clear chat", "clear conversation", "reset chat"]:
+            self.log_system_message("Voice Command: Clearing chat history...")
+            self.clear_chat()
+            
+        elif normalized in ["show settings", "open settings", "go to settings"]:
+            self.log_system_message("Voice Command: Opening settings...")
+            if self.content_stack.currentIndex() == 0:
+                self.toggle_settings_panel()
+                
+        elif normalized in ["show chat", "open chat", "go to chat", "back to chat"]:
+            self.log_system_message("Voice Command: Switching to chat...")
+            if self.content_stack.currentIndex() != 0:
+                self.toggle_settings_panel_back()
+                
+        elif normalized in ["minimize", "hide window", "hide clueless"]:
+            self.log_system_message("Voice Command: Minimizing...")
+            self.showMinimized()
+            
+        elif normalized in ["exit clueless", "quit clueless", "exit", "quit", "close clueless"]:
+            self.log_system_message("Voice Command: Exiting...")
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()
+            
+        else:
+            self.input_field.setPlainText(text)
+            self.send_user_message()
+
+    def clear_chat(self):
+        self.chat_history = []
+        while self.scroll_layout.count() > 1:
+            item = self.scroll_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.log_system_message("Chat history cleared.")
 
     def check_lmstudio_status(self):
         self.status_label.setText("LMStudio: Connecting...")

@@ -31,7 +31,7 @@ python main.py
 
 ## Minimizing & System Tray
 
-To keep your workspace clean, Clueless is configured as a floating desktop overlay that does not display in the taskbar.
+Clueless is configured as a floating desktop overlay that does not display in the taskbar.
 
 * **Minimizing:** Click the minimize (`-`) button to hide the overlay.
 * **Restoring/Reopening:** Single-click the circular **"C" icon** in the **system tray** (in the notification area on the bottom-right corner of the screen next to the clock). If it's hidden, click the upward arrow (`^`) icon to reveal it.
